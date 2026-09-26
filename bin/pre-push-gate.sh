@@ -3,9 +3,11 @@
 # opencode-memory-efficiency repository.
 #
 # Assertions (any failure => non-zero exit, no push):
-#   (a) no forbidden path is tracked in `git ls-files`
-#   (b) the broad secret scan over tracked blobs returns ZERO matches
-#   (c) no tracked file matches node_modules|/logs/|exports|backups|
+#   (0) the index has no staged-but-uncommitted changes, so HEAD is exactly the
+#       tree a push transmits (fail-closed instead of scanning stale index state)
+#   (a) no forbidden path exists in the HEAD tree
+#   (b) the broad secret scan over HEAD blobs returns ZERO matches
+#   (c) no HEAD file matches node_modules|/logs/|exports|backups|
 #       oh-my-openagent|package-lock (plus runtime/DB artifacts)
 #
 # Consumed by the publish workflow (todo 16). Run from anywhere:
@@ -27,13 +29,19 @@ echo "repo: $REPO_ROOT"
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
   || fail "not inside a git work tree"
 
-FILES="$(git ls-files 2>&1)" || fail "git ls-files errored"
-if [ -z "$FILES" ]; then
-  fail "git ls-files is empty (nothing to publish)"
-fi
-echo "tracked files: $(printf '%s\n' "$FILES" | wc -l)"
+# Fail-closed: scan the committed tree (HEAD) — what a push transmits. Refuse if
+# the index holds staged-but-uncommitted changes so a HEAD scan can never
+# silently diverge from the content being published.
+git diff --cached --quiet \
+  || fail "index has staged-but-uncommitted changes; commit or unstage before running the gate"
 
-# --- (a)+(c) forbidden tracked paths -----------------------------------------
+FILES="$(git ls-tree -r --name-only HEAD 2>&1)" || fail "git ls-tree HEAD errored"
+if [ -z "$FILES" ]; then
+  fail "HEAD tree is empty (nothing to publish)"
+fi
+echo "HEAD files: $(printf '%s\n' "$FILES" | wc -l)"
+
+# --- (a)+(c) forbidden paths in the HEAD tree --------------------------------
 FORBIDDEN_RE='node_modules|(^|/)logs/|exports|backups|oh-my-openagent|package-lock|tool-spill|trash-|lsp-install-decisions\.json|\.db(-wal|-shm)?$'
 FORBIDDEN_HITS="$(printf '%s\n' "$FILES" | grep -En "$FORBIDDEN_RE" || true)"
 if [ -n "$FORBIDDEN_HITS" ]; then
@@ -43,7 +51,7 @@ if [ -n "$FORBIDDEN_HITS" ]; then
 fi
 echo "(a)/(c) forbidden-path check: PASS"
 
-# --- (b) broad secret scan over tracked blobs --------------------------------
+# --- (b) broad secret scan over HEAD blobs -----------------------------------
 # The broad regex (owner path/username, project name, Windows home path, mail,
 # GitHub tokens, OpenAI-style keys, Google API keys, Slack tokens, private-key
 # PEM headers) is base64-encoded so that this gate file does not itself contain
@@ -54,7 +62,7 @@ SECRET_RE="$(printf '%s' "$SECRET_RE_B64" | base64 -d)" \
 [ -n "$SECRET_RE" ] || fail "decoded secret pattern is empty"
 
 set +e
-SCAN_OUT="$(git grep -nIE --cached -e "$SECRET_RE" -- . 2>&1)"
+SCAN_OUT="$(git grep -nIE -e "$SECRET_RE" HEAD -- . 2>&1)"
 SCAN_RC=$?
 set -e
 if [ "$SCAN_RC" -eq 0 ]; then

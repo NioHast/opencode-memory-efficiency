@@ -234,8 +234,7 @@ is reclaimed by the TTL timer, and `unref()` keeps the timer from holding the
 process open.
 
 **Test file.** None. This module has no dedicated test file in `tests/`, and it
-is referenced only by the memory runbook. Treat it as a pre-existing module
-outside the memory-efficiency plugin suite.
+lives outside the memory-efficiency plugin suite (pre-existing module).
 
 ---
 

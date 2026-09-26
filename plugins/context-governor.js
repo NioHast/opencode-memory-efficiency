@@ -37,6 +37,7 @@
 //   PLACEHOLDER_BYTES=8000   PURGE_ERROR_TURNS=4   SPILL_DIR=<tool-spill dir>
 
 import { existsSync } from "node:fs";
+import os from "node:os";
 import { join } from "node:path";
 
 // Read a non-negative integer from env `name`; fall back when unset/invalid.
@@ -51,7 +52,7 @@ export const PURGE_ERROR_TURNS = intFromEnv("PURGE_ERROR_TURNS", 4);
 
 const DEFAULT_SPILL_DIR =
   process.env.SPILL_DIR ||
-  join(process.env.HOME || process.env.USERPROFILE || "", ".local/share/opencode/tool-spill");
+  join(os.homedir(), ".local/share/opencode/tool-spill");
 
 // Never placeholderized, deduped, purged or superseded.
 export const PROTECTED_TOOLS = new Set([

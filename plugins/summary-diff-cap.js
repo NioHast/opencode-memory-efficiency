@@ -195,10 +195,7 @@ export function capDiffs(message, opts = {}) {
       retained.push(k.entry);
     }
 
-    // Never remove the array; never leave an empty array behind if entries
-    // existed but every one was vendor/dropped? The task requires vendor paths
-    // removed entirely, so a vendor-only array legitimately becomes []. The
-    // ARRAY itself is preserved.
+    // Vendor-only arrays legitimately become []; the array itself is always preserved.
     summary.diffs = retained;
     return message;
   } catch {
