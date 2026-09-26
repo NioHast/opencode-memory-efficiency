@@ -9,3 +9,5 @@ trash-*/
 *.bak-*
 .env*
 oh-my-openagent/
+lsp-install-decisions.json
+tui.json
