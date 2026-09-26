@@ -1,0 +1,11 @@
+node_modules/
+logs/
+package-lock.json
+bun.lock
+exports/
+backups/
+tool-spill/
+trash-*/
+*.bak-*
+.env*
+oh-my-openagent/

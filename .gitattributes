@@ -1,0 +1,13 @@
+# Normalize all text files to LF in the repository.
+* text=auto eol=lf
+
+# Shell scripts must always be LF, even on Windows checkouts.
+*.sh text eol=lf
+
+# Binary assets are never line-ending converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
