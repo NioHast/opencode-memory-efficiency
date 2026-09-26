@@ -6,22 +6,25 @@
 #                 destructive step and never vacuums, even while opencode runs.
 #   --mode=full   metering + backup, then — ONLY when `pgrep -x opencode` is
 #                 empty AND free disk is sufficient — the destructive sequence:
-#                   1. db-retention.sh --apply
+#                   1. mega-session-export-delete.sh --apply --no-vacuum --skip-backup
+#                        (runs FIRST so the export captures the stored
+#                         summary.diffs BEFORE the diff rewrite truncates them)
+#                   2. db-retention.sh --apply
 #                        (single owner of wal_checkpoint(TRUNCATE) + VACUUM;
 #                         also writes its own verified pre-delete backup)
-#                   2. summary-diff-prune.sh --apply --no-vacuum --skip-backup
-#                   3. storage-prune.sh --apply
-#                   4. mega-session-export-delete.sh --apply --no-vacuum --skip-backup
+#                   3. summary-diff-prune.sh --apply --no-vacuum --skip-backup
+#                   4. storage-prune.sh --apply
 #                 then exactly ONE summary line appended to $LOG_FILE.
-#                 step 1 is first so it is still the only VACUUM owner; steps
-#                 2 and 4 mutate data and intentionally do NOT checkpoint/vacuum.
+#                 step 2 is the only VACUUM owner; steps 1 and 3 mutate data and
+#                 intentionally do NOT checkpoint/vacuum.
 #   --dry-run     Print the exact planned sequence and apply NOTHING. For
 #                 --mode=full it also runs each destuctive script's read-only
 #                 dry-run to list the exact rows/paths that would be removed.
 #
 # Running gate: the destructive sequence never starts while `pgrep -x opencode`
-# is non-empty; it logs reason=opencode_running and exits 0. Children are also
-# invoked with ALLOW_WHILE_RUNNING=0 as defense in depth.
+# is non-empty; it logs reason=opencode_running and exits 0. ALLOW_WHILE_RUNNING=0
+# is exported for the whole destructive block as defense in depth, so every child
+# re-checks and refuses independently.
 #
 # Disk guard: before the destructive sequence, free space on $OPENCODE_HOME must
 # be >= 3x the DB size + $DISK_MARGIN_KB (the orchestrator backup, the retention
@@ -152,16 +155,20 @@ if [ "$DRY_RUN" -eq 1 ]; then
     elif [ "$disk_ok" -eq 0 ]; then
       say "plan: destructive steps SKIPPED reason=insufficient_disk"
     else
+      say "plan: mega-session-export-delete.sh --apply --no-vacuum --skip-backup"
       say "plan: db-retention.sh --apply"
       say "plan: summary-diff-prune.sh --apply --no-vacuum --skip-backup"
       say "plan: storage-prune.sh --apply"
-      say "plan: mega-session-export-delete.sh --apply --no-vacuum --skip-backup"
     fi
     say "plan: exactly ONE summary log line -> $LOG_FILE"
     say "--- exact delete plan (read-only dry-runs) ---"
     if [ "$opencode_running" -eq 1 ]; then
       say "note: opencode running -> a real --mode=full would skip these steps;"
       say "      read-only plans are shown anyway to document the exact deletes."
+    fi
+    if [ -x "$MEGA_SH" ]; then
+      say "== mega-session-export-delete.sh --plan-only =="
+      "$MEGA_SH" --plan-only || true
     fi
     if [ -x "$RETENTION_SH" ]; then
       say "== db-retention.sh --dry-run =="
@@ -174,10 +181,6 @@ if [ "$DRY_RUN" -eq 1 ]; then
     if [ -x "$STORAGE_SH" ]; then
       say "== storage-prune.sh --dry-run =="
       "$STORAGE_SH" --dry-run || true
-    fi
-    if [ -x "$MEGA_SH" ]; then
-      say "== mega-session-export-delete.sh --plan-only =="
-      "$MEGA_SH" --plan-only || true
     fi
   fi
   say "maintenance: dry-run done rc=0"
@@ -215,6 +218,7 @@ say "metering: $meter_status (child=$child total=$total)"
 # step 2 — backup (always, best-effort; never fails the run)
 # ---------------------------------------------------------------------------
 backup_status="skipped"
+backup_reason=""
 if [ ! -x "$BACKUP_SH" ]; then
   backup_status="missing"
 else
@@ -222,9 +226,13 @@ else
     backup_status="ok"
   else
     backup_status="fail:rc=$?"
+    backup_reason="$(awk 'NF{last=$0} END{print last}' "$TMPD/backup.txt" 2>/dev/null \
+      | tr -s ' \t' '_' | cut -c1-160)"
+    [ -n "$backup_reason" ] || backup_reason="unknown"
   fi
 fi
 say "backup: $backup_status (best-effort; non-atomic while opencode runs)"
+[ -n "$backup_reason" ] && say "backup_reason: $backup_reason"
 
 # ---------------------------------------------------------------------------
 # steps 3+ — destructive sequence (full mode only, gated)
@@ -257,25 +265,49 @@ if [ "$MODE" = "full" ]; then
   else
     full_status="applied"
 
-    # step 3 — db-retention.sh --apply: the ONLY checkpoint/VACUUM owner
-    if [ ! -x "$RETENTION_SH" ]; then
-      ret_status="missing"
+    # Defense in depth: export ALLOW_WHILE_RUNNING=0 for the whole destructive
+    # block so every child independently refuses while opencode is alive, even
+    # though this orchestrator already gated on `pgrep -x opencode`.
+    export ALLOW_WHILE_RUNNING=0
+
+    # step 3 — mega-session-export-delete.sh --apply (no vacuum, no backup).
+    # FIRST so the export captures summary.diffs BEFORE the diff rewrite.
+    if [ ! -x "$MEGA_SH" ]; then
+      mega_status="missing"
       full_status="fail"
-    elif ALLOW_WHILE_RUNNING=0 RETENTION_DAYS="$RETENTION_DAYS" \
-         "$RETENTION_SH" --apply >"$TMPD/retention.txt" 2>&1; then
-      ret_status="applied"
-      ret_deleted_sessions="$(awk -F': ' '/^DELETED_SESSIONS:/ {print $2; exit}' "$TMPD/retention.txt")"
-      ret_deleted_events="$(awk -F': ' '/^DELETED_EVENTS:/ {print $2; exit}' "$TMPD/retention.txt")"
-      [ -n "$ret_deleted_sessions" ] || ret_deleted_sessions="n/a"
-      [ -n "$ret_deleted_events" ] || ret_deleted_events="n/a"
+    elif "$MEGA_SH" --apply --no-vacuum --skip-backup >"$TMPD/mega.txt" 2>&1; then
+      mega_status="applied"
+      mega_deleted="$(awk -F': ' '/^DELETED_SESSIONS:/ {print $2; exit}' "$TMPD/mega.txt")"
+      [ -n "$mega_deleted" ] || mega_deleted="n/a"
     else
-      ret_status="fail:rc=$?"
+      mega_status="fail:rc=$?"
       full_status="fail"
     fi
-    say "retention: $ret_status (deleted_sessions=$ret_deleted_sessions deleted_events=$ret_deleted_events)"
+    say "mega: $mega_status (deleted_sessions=$mega_deleted)"
+
+    if [ "$mega_status" = "applied" ]; then
+      # step 4 — db-retention.sh --apply: the ONLY checkpoint/VACUUM owner
+      if [ ! -x "$RETENTION_SH" ]; then
+        ret_status="missing"
+        full_status="fail"
+      elif RETENTION_DAYS="$RETENTION_DAYS" \
+           "$RETENTION_SH" --apply >"$TMPD/retention.txt" 2>&1; then
+        ret_status="applied"
+        ret_deleted_sessions="$(awk -F': ' '/^DELETED_SESSIONS:/ {print $2; exit}' "$TMPD/retention.txt")"
+        ret_deleted_events="$(awk -F': ' '/^DELETED_EVENTS:/ {print $2; exit}' "$TMPD/retention.txt")"
+        [ -n "$ret_deleted_sessions" ] || ret_deleted_sessions="n/a"
+        [ -n "$ret_deleted_events" ] || ret_deleted_events="n/a"
+      else
+        ret_status="fail:rc=$?"
+        full_status="fail"
+      fi
+      say "retention: $ret_status (deleted_sessions=$ret_deleted_sessions deleted_events=$ret_deleted_events)"
+    else
+      say "retention: SKIPPED (mega did not succeed)"
+    fi
 
     if [ "$ret_status" = "applied" ]; then
-      # step 4 — summary-diff-prune.sh --apply (no vacuum, no backup)
+      # step 5 — summary-diff-prune.sh --apply (no vacuum, no backup)
       if [ ! -x "$SUMMARY_SH" ]; then
         summary_status="missing"
         full_status="fail"
@@ -295,7 +327,7 @@ if [ "$MODE" = "full" ]; then
     fi
 
     if [ "$summary_status" = "applied" ]; then
-      # step 5 — storage-prune.sh --apply (filesystem quarantine; no DB vacuum)
+      # step 6 — storage-prune.sh --apply (filesystem quarantine; no DB vacuum)
       if [ ! -x "$STORAGE_SH" ]; then
         storage_status="missing"
         full_status="fail"
@@ -310,24 +342,6 @@ if [ "$MODE" = "full" ]; then
       say "storage: $storage_status (freed_bytes=$storage_freed)"
     else
       say "storage: SKIPPED (summary did not succeed)"
-    fi
-
-    if [ "$storage_status" = "applied" ]; then
-      # step 6 — mega-session-export-delete.sh --apply (no vacuum, no backup)
-      if [ ! -x "$MEGA_SH" ]; then
-        mega_status="missing"
-        full_status="fail"
-      elif "$MEGA_SH" --apply --no-vacuum --skip-backup >"$TMPD/mega.txt" 2>&1; then
-        mega_status="applied"
-        mega_deleted="$(awk -F': ' '/^DELETED_SESSIONS:/ {print $2; exit}' "$TMPD/mega.txt")"
-        [ -n "$mega_deleted" ] || mega_deleted="n/a"
-      else
-        mega_status="fail:rc=$?"
-        full_status="fail"
-      fi
-      say "mega: $mega_status (deleted_sessions=$mega_deleted)"
-    else
-      say "mega: SKIPPED (storage did not succeed)"
     fi
   fi
 else
@@ -366,16 +380,17 @@ fi
 mkdir -p -- "$(dirname -- "$LOG_FILE")"
 line="ts=$TS maintenance=run mode=$MODE meter=$meter_status child=$child total=$total"
 line="$line backup=$backup_status"
+[ -n "$backup_reason" ] && line="$line backup_reason=$backup_reason"
 if [ "$MODE" = "full" ]; then
   if [ "$full_status" = "skipped" ]; then
     line="$line destructive=skipped reason=$skip_reason"
     [ "$opencode_running" -eq 1 ] && line="$line pid=$running_pid"
   else
     line="$line destructive=$full_status"
+    line="$line mega=$mega_status mega_deleted_sessions=$mega_deleted"
     line="$line retention=$ret_status deleted_sessions=$ret_deleted_sessions deleted_events=$ret_deleted_events"
     line="$line summary=$summary_status changed_messages=$summary_changed summary_reduction_pct=$summary_reduction"
     line="$line storage=$storage_status freed_bytes=$storage_freed"
-    line="$line mega=$mega_status mega_deleted_sessions=$mega_deleted"
     line="$line integrity=$final_integrity"
   fi
 fi

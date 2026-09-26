@@ -166,11 +166,13 @@ bash "$HOME/.config/opencode/bin/opencode-maintenance.sh" --mode=safe
 Everything safe mode does, plus the destructive steps, and only when
 `pgrep -x opencode` is empty:
 
-1. `mega-session-export-delete.sh --apply` exports the mega sessions and deletes only the
-   non-active one. This runs before the diff rewrite so the export captures original
-   patches.
+1. `mega-session-export-delete.sh --apply --no-vacuum --skip-backup` exports the mega
+   sessions and deletes only the non-active one. This runs FIRST, before the diff rewrite,
+   so the export captures original patches.
 2. `db-retention.sh --apply` deletes old child sessions and their events, then VACUUMs.
-3. `summary-diff-prune.sh --apply` rewrites stored `summary.diffs` patches for kept sessions.
+   It is the single owner of `wal_checkpoint(TRUNCATE)` + `VACUUM`.
+3. `summary-diff-prune.sh --apply --no-vacuum --skip-backup` rewrites stored `summary.diffs`
+   patches for kept sessions.
 4. `storage-prune.sh --apply` quarantines then deletes orphan `session_diff`/`snapshot` files.
 5. One summary line is appended to the maintenance log.
 
@@ -503,8 +505,9 @@ Notes:
 - Every `--apply` script verifies `PRAGMA integrity_check` and `foreign_key_check` after
   writing, and opens write connections with `PRAGMA foreign_keys=ON`.
 - `ALLOW_WHILE_RUNNING=1` exists for the tests only. Do not set it on a live DB.
-- `--mode=full` runs steps 2 through 5 as one gated orchestrator call; the hand-run
-  sequence above is only for manual recovery or debugging.
+- `--mode=full` runs steps 2 through 5 in exactly this order (mega -> retention -> summary
+  -> storage) as one gated orchestrator call; the hand-run sequence above is only for
+  manual recovery or debugging.
 
 ## 9. Plugin inventory
 
@@ -682,6 +685,7 @@ bash "$HOME/.config/opencode/bin/opencode-maintenance.sh" --mode=safe
 bash "$HOME/.config/opencode/bin/opencode-capped.sh"
 
 # Deferred destructive apply (opencode MUST be stopped)
+# order = mega -> retention -> summary -> storage (same as --mode=full)
 bash "$HOME/.config/opencode/bin/backup-rollback.sh" backup
 bash "$HOME/.config/opencode/bin/mega-session-export-delete.sh" --apply
 bash "$HOME/.config/opencode/bin/db-retention.sh" --apply
