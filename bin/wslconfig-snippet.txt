@@ -1,0 +1,39 @@
+# ============================================================
+# WSL2 swap plan for opencode memory efficiency
+# EXAMPLE (machine-specific) — paths use %USERPROFILE%; substitute your own.
+# Target file: %USERPROFILE%\.wslconfig
+# ============================================================
+#
+# Exact content to write into %USERPROFILE%\.wslconfig:
+#
+# ---- BEGIN %USERPROFILE%\.wslconfig ----
+[wsl2]
+memory=4GB
+swap=8GB
+pageReporting=true
+# ---- END %USERPROFILE%\.wslconfig ----
+#
+# Notes:
+#   * The current file also has an [experimental] section
+#     (autoMemoryReclaim=gradual, sparseVhd=true); keep it if desired.
+#   * swap=8GB gives opencode headroom to spill instead of being
+#     OOM-killed while memory=4GB keeps the Windows host safe.
+#   * Host has ~6GB total RAM, so Windows needs the remaining headroom.
+#
+# ============================================================
+# Apply steps (run in Windows PowerShell or CMD, NOT inside WSL):
+# ============================================================
+#   1. Edit %USERPROFILE%\.wslconfig with the content above.
+#   2. Shut down the whole WSL VM so the new settings load:
+#
+#          wsl --shutdown
+#
+#   3. Re-open your WSL terminal (Ubuntu).
+#   4. Verify the new swap is active from inside WSL:
+#
+#          free -h
+#          cat /proc/swaps
+#
+#   Expected: Swap shows ~8.0GiB and /proc/swaps lists
+#             /mnt/wslg/... or a swap file of about 8GB.
+# ============================================================
